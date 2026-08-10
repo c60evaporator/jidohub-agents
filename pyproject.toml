@@ -1,0 +1,90 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jidohub-agents"
+version = "0.1.0"
+description = "jidohub: Agent をロードして実行する Python API（torch がここで初めて必須になる実行層）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "jidohub" }]
+keywords = ["autonomous-driving", "agent", "nuscenes", "jidohub", "pytorch"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Typing :: Typed",
+]
+# torch はここで初めて必須依存になる。core と datasets が torch なしで動くことは
+# プラットフォーム全体の前提であり、その境界が本リポジトリである（CLAUDE.md 1 章）。
+dependencies = [
+    # PyPI 未公開。素の名前＋緩い下限で書く（VCS URL の直接参照は書かない。CLAUDE.md 1.2）。
+    # 0.x は minor 差も非互換。core 0.2 の Image / EncodedPixels に依存するため下限を上げる。
+    "jidohub-core>=0.2",
+    "numpy",
+    "torch",
+    # Pillow は必須。agents 単体で 2D Agent の ImageSample.array が即座に動くことを優先する
+    # （datasets と整合）。nvJPEG(torchvision) が在れば優先し、既登録は上書きしない（decoders.py）。
+    "pillow",
+]
+
+[project.optional-dependencies]
+# ベンチマークハーネスは datasets を必要とするため optional extra とし、通常のインストールに
+# 含めない（CLAUDE.md 1 章）。**次段階で使う。現状は宣言のみ**で実装は伴わない。
+benchmark = ["jidohub-datasets", "nuscenes-devkit"]
+dev = ["pytest", "pytest-cov", "ruff", "mypy"]
+
+[tool.hatch.build.targets.wheel]
+# PEP 420 namespace package。src/jidohub/__init__.py は存在させない。
+packages = ["src/jidohub"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/jidohub/agents/py.typed" = "jidohub/agents/py.typed"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/jidohub",
+    "README.md",
+    "CLAUDE.md",
+    "pyproject.toml",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+# 行長は formatter が管理する。E501 は formatter が折り返せない文字列・コメント
+# （日本語 docstring 等）だけを誤って咎めるため無効化する（core / datasets と同方針）。
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+# 型チェックの対象バージョンは 3.12（core / datasets と同じ。numpy>=2.3 の型スタブが
+# PEP 695 の `type` 文を使うため）。ランタイムの 3.10 互換は pytest マトリクスで担保。
+python_version = "3.12"
+disallow_untyped_defs = true
+# torch / torchvision はスタブが不完全なため未解決 import を許容する（core と同方針）。
+ignore_missing_imports = true
+mypy_path = "src"
+explicit_package_bases = true
+namespace_packages = true
+files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+# テストは fixture 引数（tmp_path 等）が未注釈で、スキーマの Optional フィールドへの
+# アクセスで union-attr が多発する。テストでは型定義の厳格さを求めない（core / datasets と同方針）。
+# ダミー Agent は動的属性（loaded_weights 等）を持ち、また StreamingMixin と
+# タスク別抽象クラスを合成すると predict のシグネチャ差で misc が出る（設計上の既知の
+# 非互換。base.py の契約に由来し、本リポジトリでは変更しない）。tests に限定して緩和する。
+module = ["tests.*", "conftest"]
+disallow_untyped_defs = false
+disable_error_code = ["union-attr", "arg-type", "index", "attr-defined", "misc", "operator"]

@@ -18,10 +18,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from jidohub.agents.exceptions import IsolationViolationError
+from jidohub.agents.registry import resolve_native_agent
+
 if TYPE_CHECKING:
-    from jidohub.agents.base import BaseAgent
     from jidohub.core.config import AgentConfig
     from jidohub.core.hub import AgentReference
+
+    from jidohub.agents.base import BaseAgent
 
 __all__ = ["AutoAgent"]
 
@@ -64,18 +68,70 @@ class AutoAgent:
         Raises:
             AgentResolutionError: クラスを解決できない場合。
             IsolationViolationError: 隔離要件に反する組み合わせが指定された場合。
+            NotImplementedError: docker runner / shm transport / remote_code など、
+                次段階でのみ実装される経路が要求された場合。
         """
-        raise NotImplementedError
+        from jidohub.core.hub import HubClient
+
+        # 取得 + config 読込（core が担当）。ローカル参照はコピーせずそのパスが返る。
+        client = HubClient()
+        config, repo_path = client.load_config(reference, revision)
+
+        # runner="auto" は config.runtime.isolation から決める。
+        # **実行環境の性質であり Agent の性質ではない**ため、ここで解決する。
+        effective_runner = cls._resolve_runner(config, runner)
+
+        # 隔離検証（agents 側でも二重に検証する。CLAUDE.md 2.4）。
+        cls._check_isolation(config, effective_runner, transport)
+
+        # クラス解決（task 整合の検証を含む）。
+        agent_class = cls._resolve_class(config, repo_path)
+
+        # 解決したクラスの from_pretrained へ委譲する（二重実装を避ける）。
+        # repo_path（ローカル Path）を渡すため再取得は発生しない。
+        return agent_class.from_pretrained(repo_path, device=device, **kwargs)
+
+    @staticmethod
+    def _resolve_runner(config: AgentConfig, runner: str) -> str:
+        """``runner="auto"`` を config から解決する。
+
+        ``isolation == "required"`` なら docker、それ以外は inprocess。
+        明示指定（``"inprocess"`` / ``"docker"``）はそのまま返す。
+        """
+        if runner != "auto":
+            return runner
+        return "docker" if config.runtime.isolation == "required" else "inprocess"
 
     @classmethod
     def _resolve_class(cls, config: AgentConfig, repo_path: Path) -> type[BaseAgent]:
         """config から Agent クラスを解決する。
 
-        ``native`` はレジストリから、``remote_code`` は ``auto_map`` のパスから
-        動的ロードする。解決後、**クラスの ``task`` が config の ``task`` と
-        一致すること**を検証する（宣言と実装の食い違いを早期に検出するため）。
+        ``native`` はレジストリから解決する。``remote_code`` の動的ロードは
+        docker runner を要するため**次段階**であり、ここでは明示的な
+        :class:`NotImplementedError` にする（黙って inprocess にフォールバックしない）。
+
+        解決後、**クラスの ``task`` が config の ``task`` と一致すること**を
+        検証する（宣言と実装の食い違いを早期に検出するため）。
         """
-        raise NotImplementedError
+        from jidohub.agents.exceptions import AgentResolutionError
+
+        if config.implementation.type == "remote_code":
+            raise NotImplementedError(
+                "remote_code agents require a docker runner to load unreviewed code "
+                "in isolation; this is not yet implemented (native + inprocess only)."
+            )
+
+        # native。native_class は Implementation の検証で非 None が保証されている。
+        assert config.implementation.native_class is not None
+        agent_class = resolve_native_agent(config.implementation.native_class)
+
+        if agent_class.task != config.task:
+            raise AgentResolutionError(
+                f"task mismatch: {agent_class.__name__} implements "
+                f"{agent_class.task.value!r} but agent_config.json declares "
+                f"{config.task.value!r}"
+            )
+        return agent_class
 
     @classmethod
     def _check_isolation(cls, config: AgentConfig, runner: str, transport: str) -> None:
@@ -85,8 +141,32 @@ class AutoAgent:
         強制されているが、**agents 側でも二重に検証する**。config を経由しない
         経路（クラスを直接構築する等）でも破られないようにするため（CLAUDE.md 2.4）。
 
-        - ``isolation == "required"`` の Agent を ``runner="inprocess"`` で実行しない
         - ``remote_code`` の Agent に ``transport="shm"`` を許可しない
           （IPC 名前空間の共有を要し、隔離が弱まるため）
+        - ``transport="shm"`` / ``runner="docker"`` は次段階でのみ実装される
+        - ``isolation == "required"`` の Agent を ``runner="inprocess"`` で実行しない
         """
-        raise NotImplementedError
+        # shm は remote_code では隔離を弱めるため拒否する（セキュリティ境界）。
+        # それ以外でも共有メモリ転送は docker runner を要し、現段階では未実装。
+        if transport == "shm":
+            if config.implementation.type == "remote_code":
+                raise IsolationViolationError(
+                    "transport='shm' is refused for remote_code agents: sharing the IPC "
+                    "namespace weakens the isolation that unreviewed code requires."
+                )
+            raise NotImplementedError(
+                "transport='shm' requires a docker runner and is not yet implemented."
+            )
+
+        if runner == "docker":
+            raise NotImplementedError(
+                "docker runner is not yet implemented (native + inprocess only)."
+            )
+
+        # ここに到達したら runner は inprocess。未審査コード相当（isolation required）を
+        # inprocess で動かさない。黙って inprocess にフォールバックしない。
+        if config.runtime.isolation == "required":
+            raise IsolationViolationError(
+                f"{config.agent_id} declares runtime.isolation='required' and cannot run "
+                "in-process; a docker runner is required (not yet implemented)."
+            )

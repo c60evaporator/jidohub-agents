@@ -29,7 +29,11 @@ from jidohub.core.schemas import (
 )
 from jidohub.core.tasks import TaskType
 
-from jidohub.agents.exceptions import StateNotInitializedError
+from jidohub.agents.exceptions import (
+    AgentResolutionError,
+    IsolationViolationError,
+    StateNotInitializedError,
+)
 
 if TYPE_CHECKING:
     from jidohub.core.hub import AgentReference
@@ -104,7 +108,42 @@ class BaseAgent(ABC):
             収まるため、sharding の複雑さを持ち込まない。必要になれば
             引数追加という非破壊変更で対応できる。
         """
-        raise NotImplementedError
+        from jidohub.core.hub import HubClient
+
+        # 1. 取得 + config 読込（core が担当）。ローカル参照はコピーせずそのパスが返る。
+        client = HubClient()
+        config, repo_path = client.load_config(reference, revision)
+
+        # 2. 宣言（config.task）と実装（cls.task）の食い違いを早期に検出する。
+        if config.task != cls.task:
+            raise AgentResolutionError(
+                f"task mismatch: {cls.__name__} implements {cls.task.value!r} "
+                f"but agent_config.json declares {config.task.value!r}"
+            )
+
+        # 3. 隔離要件の検証（未審査コードを inprocess で動かさない。CLAUDE.md 2.4）。
+        #    現段階は Runner が inprocess しかないため、required は明示的なエラーにする
+        #    （黙って inprocess で動かさない）。AutoAgent 側でも二重に検証する。
+        if config.runtime.isolation == "required":
+            raise IsolationViolationError(
+                f"{config.agent_id} declares runtime.isolation='required' and cannot run "
+                "in-process; a docker runner is required (not yet implemented)."
+            )
+
+        # 4. モデルと Processor を構築（Agent 作者の _from_config）。重みはまだ読まない。
+        agent = cls._from_config(config, repo_path, device, **kwargs)
+        agent.config = config
+        agent.repo_path = repo_path
+        agent.device = device
+
+        # 5. チェックサム検証の後、各重みを読み込む。重みを持たない Agent
+        #    （ルールベース等）では config.weights が空なので load_weights を呼ばない。
+        if config.weights:
+            client.verify_weights(config, repo_path)
+            for weight in config.weights:
+                agent.load_weights(repo_path / weight.path)
+
+        return agent
 
     @classmethod
     @abstractmethod

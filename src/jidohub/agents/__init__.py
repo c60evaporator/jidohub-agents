@@ -29,6 +29,10 @@ from jidohub.agents.exceptions import (
 from jidohub.agents.processing import PreprocessResult
 from jidohub.agents.registry import NATIVE_AGENTS
 
+# import 時に既定デコーダを登録する（jidohub.datasets と同じ挙動）。
+# **既に登録済みの場合は上書きしない**（利用者が nvJPEG 等を先に登録している可能性。CLAUDE.md 2.8）。
+register_default_decoder()
+
 __all__ = [
     "AutoAgent",
     "BaseAgent",
