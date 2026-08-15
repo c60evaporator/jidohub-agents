@@ -87,6 +87,12 @@ src/
   （`sensing_to_planning` の時系列モデルも同じ機構を使う）
 - **継承順序は `class XAgent(StreamingMixin, BaseAgent)` で固定。**
   逆順だと Mixin の `predict` が `BaseAgent` の abstract を上書きできない
+- **`StreamingMixin` はタスク別抽象クラス（`Detection3DAgent` / `E2EAgent` 等）と併用しない。**
+  タスク別抽象クラスの `predict(input: Sample)`（単発）と Mixin の `predict(inputs: list)`（系列）は
+  シグネチャが非互換であり、合成すると型検査が正しく矛盾を報告する。必ず `BaseAgent` とだけ合成する
+- **`StreamingMixin` を継承したら `predict` は系列を取る。** ストリーミングが必要なタスク
+  （tracking / 時系列 E2E）用の**専用のタスク別抽象クラス**（系列出力型を `predict` で固定）は、
+  複合入力型・系列出力型を core に追加するのに合わせて**次段階**で定義する（4 章）
 - Agent 作者が実装するのは `reset()` と `step()` のみ。
   **既定の `predict()` を override しないこと**
 - **不変条件**: `predict(inputs)` の結果は、`reset()` してから `step()` を

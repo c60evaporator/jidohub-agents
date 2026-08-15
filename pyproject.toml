@@ -80,11 +80,10 @@ namespace_packages = true
 files = ["src", "tests"]
 
 [[tool.mypy.overrides]]
-# テストは fixture 引数（tmp_path 等）が未注釈で、スキーマの Optional フィールドへの
-# アクセスで union-attr が多発する。テストでは型定義の厳格さを求めない（core / datasets と同方針）。
-# ダミー Agent は動的属性（loaded_weights 等）を持ち、また StreamingMixin と
-# タスク別抽象クラスを合成すると predict のシグネチャ差で misc が出る（設計上の既知の
-# 非互換。base.py の契約に由来し、本リポジトリでは変更しない）。tests に限定して緩和する。
+# テストは fixture 引数が未注釈で、スキーマの Optional フィールドへのアクセスで
+# union-attr が多発する。テストでは型定義の厳格さを求めない（core / datasets と同方針）。
+# ダミー Agent の動的属性はクラス注釈で解決し、StreamingMixin は BaseAgent とのみ
+# 合成して predict の非互換（misc）を避けるため、緩和は core / datasets と同じ 3 つに留める。
 module = ["tests.*", "conftest"]
 disallow_untyped_defs = false
-disable_error_code = ["union-attr", "arg-type", "index", "attr-defined", "misc", "operator"]
+disable_error_code = ["union-attr", "arg-type", "index"]

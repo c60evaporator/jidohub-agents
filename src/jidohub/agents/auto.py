@@ -71,11 +71,18 @@ class AutoAgent:
             NotImplementedError: docker runner / shm transport / remote_code など、
                 次段階でのみ実装される経路が要求された場合。
         """
-        from jidohub.core.hub import HubClient
+        from jidohub.core.hub import AgentReference, HubClient
+
+        # 参照を 1 度だけ解決する（revision を含む）。取得と、委譲先での記録の両方に使う。
+        resolved = (
+            reference
+            if isinstance(reference, AgentReference)
+            else AgentReference.parse(reference, revision)
+        )
 
         # 取得 + config 読込（core が担当）。ローカル参照はコピーせずそのパスが返る。
         client = HubClient()
-        config, repo_path = client.load_config(reference, revision)
+        config, repo_path = client.load_config(resolved)
 
         # runner="auto" は config.runtime.isolation から決める。
         # **実行環境の性質であり Agent の性質ではない**ため、ここで解決する。
@@ -88,8 +95,11 @@ class AutoAgent:
         agent_class = cls._resolve_class(config, repo_path)
 
         # 解決したクラスの from_pretrained へ委譲する（二重実装を避ける）。
-        # repo_path（ローカル Path）を渡すため再取得は発生しない。
-        return agent_class.from_pretrained(repo_path, device=device, **kwargs)
+        # 取得は済んでいるので**ローカル repo_path** を渡し（再取得なし）、revision を含む
+        # 解決済み参照は _resolved_reference で別途伝える（そうしないと revision が失われる）。
+        return agent_class.from_pretrained(
+            repo_path, device=device, _resolved_reference=resolved, **kwargs
+        )
 
     @staticmethod
     def _resolve_runner(config: AgentConfig, runner: str) -> str:

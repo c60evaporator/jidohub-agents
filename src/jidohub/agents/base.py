@@ -62,6 +62,9 @@ class BaseAgent(ABC):
         config: ``agent_config.json`` の内容。
         repo_path: ローカルに展開された Agent リポジトリのパス。
         device: モデルを載せるデバイス（``"cuda:0"`` / ``"cpu"`` など）。
+        reference: 解決済みの参照（``revision`` を含む）。``AutoAgent`` 経由でも
+            委譲先に revision が伝わるようにここに保持する。参照を解決できない
+            経路（テストで直接構築する等）では ``None``。
 
     Note:
         ジェネリック（``Generic[InputT, OutputT]``）にしていないのは、
@@ -73,6 +76,7 @@ class BaseAgent(ABC):
     config: AgentConfig
     repo_path: Path
     device: str
+    reference: AgentReference | None
 
     #: このクラスが担当するタスク。サブクラスが必ず設定する。
     #: ``AutoAgent`` が config の ``task`` と突き合わせて検証する。
@@ -84,6 +88,8 @@ class BaseAgent(ABC):
         reference: str | Path | AgentReference,
         revision: str | None = None,
         device: str = "cpu",
+        *,
+        _resolved_reference: AgentReference | None = None,
         **kwargs: Any,
     ) -> BaseAgent:
         """Agent を取得・構築して返す。**override しないこと。**
@@ -94,12 +100,18 @@ class BaseAgent(ABC):
             3. **隔離要件の検証**（``remote_code`` を inprocess で動かさない。2.4）
             4. ``cls._from_config()`` でモデルと Processor を構築
             5. ``verify_weights()`` の後、``load_weights()`` で重みを読み込む
+            6. 解決済み参照（revision を含む）を ``self.reference`` に記録する
 
         Args:
             reference: Agent の参照（``"acme/Foo@v1"`` / ローカルパス / S3 URI）。
             revision: リビジョン。``reference`` に ``@`` 表記がある場合は指定しない。
             device: モデルを載せるデバイス。``_from_config`` に引き渡される。
                 Agent 作者が環境変数を直接読む実装をしないこと（2.2）。
+            _resolved_reference: **内部用。** ``AutoAgent`` が解決済みの
+                :class:`AgentReference`（revision を含む）を渡す経路。``AutoAgent`` は
+                取得のため委譲先にローカル ``repo_path`` を渡すが、そのままでは revision が
+                失われるため、記録用の参照をこの引数で別途伝える。直接呼びでは ``None`` で、
+                ``from_pretrained`` 自身が ``reference`` を解析して記録する。
             **kwargs: ``_from_config`` に渡される追加設定。
 
         Note:
@@ -108,9 +120,11 @@ class BaseAgent(ABC):
             収まるため、sharding の複雑さを持ち込まない。必要になれば
             引数追加という非破壊変更で対応できる。
         """
-        from jidohub.core.hub import HubClient
+        from jidohub.core.hub import AgentReference, HubClient
 
         # 1. 取得 + config 読込（core が担当）。ローカル参照はコピーせずそのパスが返る。
+        #    **取得は常に reference で行う**（AutoAgent はローカル repo_path を渡すため
+        #    再取得は発生しない）。revision の記録は _resolved_reference で別途受ける。
         client = HubClient()
         config, repo_path = client.load_config(reference, revision)
 
@@ -142,6 +156,16 @@ class BaseAgent(ABC):
             client.verify_weights(config, repo_path)
             for weight in config.weights:
                 agent.load_weights(repo_path / weight.path)
+
+        # 6. 解決済み参照（revision を含む）を記録する。AutoAgent が渡した参照を
+        #    優先し、無ければ reference を解析する（ローカルパスは revision=None）。
+        agent.reference = (
+            _resolved_reference
+            if _resolved_reference is not None
+            else reference
+            if isinstance(reference, AgentReference)
+            else AgentReference.parse(reference, revision)
+        )
 
         return agent
 
@@ -186,6 +210,15 @@ class StreamingMixin:
 
     **tracking 専用ではない。** ``sensing_to_planning`` の時系列モデル（UniAD 等）も
     同じ機構を使うため、タスク横断の能力として定義する（CLAUDE.md 2.3）。
+
+    タスク別抽象クラスとは併用しない
+        ``Detection3DAgent`` 等のタスク別抽象クラスは ``predict(input: Sample)``（単発）を
+        宣言するが、本 Mixin の ``predict`` は **系列（``list``）** を取る。両者は
+        シグネチャが非互換であり、合成すると型検査が正しく矛盾を報告する。
+        したがって **``class X(StreamingMixin, BaseAgent)``**（タスク別抽象クラスを
+        継承しない）とすること。ストリーミングが必要なタスク（tracking や時系列 E2E）用の
+        **専用のタスク別抽象クラス**（系列出力型を ``predict`` で固定するもの）は、
+        複合入力型・系列出力型を core に追加するのに合わせて次段階で定義する（CLAUDE.md 4 章）。
 
     継承順序
         ``class XAgent(StreamingMixin, BaseAgent)`` の順で継承すること。
@@ -264,11 +297,13 @@ class StreamingMixin:
 # --- タスク別の抽象クラス -----------------------------------------------------
 #
 # predict のシグネチャで**出力型を固定**する。TaskType と出力型の 1 対 1 対応を
-# 型の上で表現するのが目的であり、実装は持たない。
+# 型の上で表現するのが目的であり、実装は持たない。これらはすべて**単発**
+# （predict(input: Sample)）であり、StreamingMixin とは併用しない。
 #
-# ストリーミングが必要なタスク（tracking 等）は、これらと StreamingMixin を
-# 併用する。複合入力型（Tracking3DInput 等）は該当 Agent の実装時に core へ
-# 定義するため、ここではまだ用意しない（CLAUDE.md 4 章）。
+# ストリーミングが必要なタスク（tracking や時系列 E2E）は、StreamingMixin と
+# BaseAgent の組（class X(StreamingMixin, BaseAgent)）で**専用のタスク別抽象クラス**を
+# 別に定義する。系列出力型・複合入力型（Tracking3DInput 等）を core へ追加するのに
+# 合わせて次段階で用意するため、ここではまだ置かない（CLAUDE.md 2.3 / 4 章）。
 
 
 class Detection3DAgent(BaseAgent):
@@ -290,11 +325,13 @@ class MapConstructionAgent(BaseAgent):
 
 
 class E2EAgent(BaseAgent):
-    """End-to-end 自動運転（``sensing_to_planning``）。
+    """End-to-end 自動運転（``sensing_to_planning``）。**単発推論**の抽象クラス。
 
-    時系列モデル（UniAD 等）は :class:`StreamingMixin` を併用する::
-
-        class UniADAgent(StreamingMixin, E2EAgent): ...
+    時系列モデル（UniAD 等）は本クラスを**継承しない**。``predict`` が系列を取るため
+    シグネチャが非互換になるからである。``StreamingMixin`` と ``BaseAgent`` の組で
+    別クラス（``class UniADAgent(StreamingMixin, BaseAgent)``）として定義する。
+    系列出力型を ``predict`` で固定するストリーミング用のタスク別抽象クラスは
+    次段階で core に追加する（:class:`StreamingMixin` の docstring 参照）。
     """
 
     task = TaskType.SENSING_TO_PLANNING

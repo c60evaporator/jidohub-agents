@@ -43,6 +43,17 @@ def test_resolves_and_delegates(register_dummy: None, write_repo: Callable[..., 
     assert isinstance(agent, DummyDetection3DAgent)
 
 
+def test_reference_revision_preserved(
+    register_dummy: None, write_repo: Callable[..., Path]
+) -> None:
+    # AutoAgent は取得のためローカル repo_path を委譲先へ渡すが、revision を含む
+    # 解決済み参照を _resolved_reference で伝えるため、構築後の Agent が revision を保持する。
+    repo = write_repo()
+    agent = AutoAgent.from_pretrained(repo, revision="v1")
+    assert agent.reference is not None
+    assert agent.reference.revision == "v1"
+
+
 def test_task_mismatch_detected(
     register_dummy: None, write_repo: Callable[..., Path], base_config: Callable[..., dict]
 ) -> None:

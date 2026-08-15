@@ -23,8 +23,10 @@ from jidohub.core.schemas import (
     MapOutput,
     Sample,
 )
+from jidohub.core.tasks import TaskType
 
 from jidohub.agents.base import (
+    BaseAgent,
     Classification2DAgent,
     Detection2DAgent,
     Detection3DAgent,
@@ -49,24 +51,34 @@ def _box3d(track_id: int | None = None) -> Box3D:
 class DummyDetection3DAgent(Detection3DAgent):
     """ステートレスな準拠 Agent。"""
 
+    #: 動的属性は from_config で設定する。クラス注釈で mypy に知らせる。
+    loaded_weights: list[Path]
+    from_config_kwargs: dict[str, Any]
+
     @classmethod
     def _from_config(
         cls, config: AgentConfig, repo_path: Path, device: str, **kwargs: Any
     ) -> "DummyDetection3DAgent":
         obj = cls()
-        obj.loaded_weights = []  # type: ignore[attr-defined]
-        obj.from_config_kwargs = kwargs  # type: ignore[attr-defined]
+        obj.loaded_weights = []
+        obj.from_config_kwargs = kwargs
         return obj
 
     def load_weights(self, path: Path) -> None:
-        self.loaded_weights.append(path)  # type: ignore[attr-defined]
+        self.loaded_weights.append(path)
 
     def predict(self, input: Sample) -> Detection3DOutput:
         return Detection3DOutput(boxes=[_box3d()], frame=CoordinateFrame.EGO)
 
 
-class DummyStreamingDetection3DAgent(StreamingMixin, Detection3DAgent):
-    """ステートフルな準拠 Agent（``track_id`` を採番する）。"""
+class DummyStreamingDetection3DAgent(StreamingMixin, BaseAgent):
+    """ステートフルな準拠 Agent（``track_id`` を採番する）。
+
+    タスク別抽象クラス（``Detection3DAgent``）は継承せず ``StreamingMixin`` +
+    ``BaseAgent`` の組にする（``predict`` が系列を取り、単発の宣言と非互換のため）。
+    """
+
+    task = TaskType.OBJECT_DETECTION_3D
 
     @classmethod
     def _from_config(
@@ -112,7 +124,7 @@ class DummyDetection2DAgent(Detection2DAgent):
 # --- 違反ダミー（共通スイートが検出すべき） ---------------------------------
 
 
-class ReversedMroAgent(Detection3DAgent, StreamingMixin):  # type: ignore[misc]
+class ReversedMroAgent(BaseAgent, StreamingMixin):
     """継承順序が逆（``BaseAgent`` が ``StreamingMixin`` より前）。
 
     :func:`~jidohub.agents.testing.check_mro_order` が検出する。
@@ -140,8 +152,10 @@ class WrongOutputTypeAgent(Detection3DAgent):
         return MapOutput()  # Detection3DOutput であるべき。
 
 
-class NoGuardStreamingAgent(StreamingMixin, Detection3DAgent):
+class NoGuardStreamingAgent(StreamingMixin, BaseAgent):
     """``step`` が ``_check_initialized`` を呼ばない違反 Agent。"""
+
+    task = TaskType.OBJECT_DETECTION_3D
 
     @classmethod
     def _from_config(
@@ -165,12 +179,13 @@ class NoGuardStreamingAgent(StreamingMixin, Detection3DAgent):
         return frames
 
 
-class LeakyStreamingAgent(StreamingMixin, Detection3DAgent):
+class LeakyStreamingAgent(StreamingMixin, BaseAgent):
     """``reset`` が内部カウンタをリセットしない違反 Agent。
 
     ``predict()`` と ``reset()+step()`` ループで ``track_id`` がずれる。
     """
 
+    task = TaskType.OBJECT_DETECTION_3D
     _counter = 0
 
     @classmethod

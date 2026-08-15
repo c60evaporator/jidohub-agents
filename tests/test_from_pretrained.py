@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Callable
 
 import pytest
@@ -11,7 +12,7 @@ from jidohub.agents.exceptions import AgentResolutionError, IsolationViolationEr
 from tests.dummies import DummyDetection3DAgent
 
 
-def test_loads_native_agent(write_repo: Callable[..., object], sensor_sample: Sample) -> None:
+def test_loads_native_agent(write_repo: Callable[..., Path], sensor_sample: Sample) -> None:
     repo = write_repo()
     agent = DummyDetection3DAgent.from_pretrained(repo, device="cpu")
     assert isinstance(agent, DummyDetection3DAgent)
@@ -22,7 +23,7 @@ def test_loads_native_agent(write_repo: Callable[..., object], sensor_sample: Sa
 
 
 def test_task_mismatch_detected(
-    write_repo: Callable[..., object], base_config: Callable[..., dict]
+    write_repo: Callable[..., Path], base_config: Callable[..., dict]
 ) -> None:
     # config は map_construction を宣言するが、クラスは object_detection_3d を実装。
     cfg = base_config(task="map_construction")
@@ -32,7 +33,7 @@ def test_task_mismatch_detected(
 
 
 def test_isolation_required_rejected(
-    write_repo: Callable[..., object], base_config: Callable[..., dict]
+    write_repo: Callable[..., Path], base_config: Callable[..., dict]
 ) -> None:
     cfg = base_config(runtime={"isolation": "required", "dockerfile": "Dockerfile"})
     repo = write_repo(cfg)
@@ -40,19 +41,38 @@ def test_isolation_required_rejected(
         DummyDetection3DAgent.from_pretrained(repo)
 
 
-def test_weights_loaded(write_repo: Callable[..., object]) -> None:
+def test_weights_loaded(write_repo: Callable[..., Path]) -> None:
     repo = write_repo(weight_bytes=b"dummy-weights")
     agent = DummyDetection3DAgent.from_pretrained(repo)
+    assert isinstance(agent, DummyDetection3DAgent)
     assert agent.loaded_weights == [repo / "weights" / "model.safetensors"]
 
 
-def test_no_weights_skips_load(write_repo: Callable[..., object]) -> None:
+def test_no_weights_skips_load(write_repo: Callable[..., Path]) -> None:
     repo = write_repo()  # weights: []
     agent = DummyDetection3DAgent.from_pretrained(repo)
+    assert isinstance(agent, DummyDetection3DAgent)
     assert agent.loaded_weights == []
 
 
-def test_from_config_receives_kwargs(write_repo: Callable[..., object]) -> None:
+def test_from_config_receives_kwargs(write_repo: Callable[..., Path]) -> None:
     repo = write_repo()
     agent = DummyDetection3DAgent.from_pretrained(repo, threshold=0.5)
+    assert isinstance(agent, DummyDetection3DAgent)
     assert agent.from_config_kwargs == {"threshold": 0.5}
+
+
+def test_reference_set_on_direct_call(write_repo: Callable[..., Path]) -> None:
+    # 直接呼びでも from_pretrained 自身が reference を解析して保持する。
+    repo = write_repo()
+    agent = DummyDetection3DAgent.from_pretrained(repo, revision="v1")
+    assert agent.reference is not None
+    assert agent.reference.revision == "v1"
+
+
+def test_local_reference_revision_none(write_repo: Callable[..., Path]) -> None:
+    # ローカルパス参照で revision 未指定なら revision は None。
+    repo = write_repo()
+    agent = DummyDetection3DAgent.from_pretrained(repo)
+    assert agent.reference is not None
+    assert agent.reference.revision is None

@@ -61,6 +61,9 @@ agents は**クラス解決・重みロード・実行**を担う。
 - `runner="docker"` / `transport="shm"`
 - ネイティブ実装（CenterPoint 等。`NATIVE_AGENTS` は現状空）
 - 評価 / ベンチマークハーネス（`[benchmark]` extra は宣言のみ）
+- ストリーミング用のタスク別抽象クラス（`Tracking3DAgent` 等）。現状は `StreamingMixin` +
+  `BaseAgent` の組で扱い、系列出力型を `predict` で固定する専用クラスと、その複合入力型 /
+  系列出力型（core 側）は次段階で追加する
 
 未審査コード（`remote_code`）を inprocess で実行することはセキュリティ境界の違反であり、
 **黙って inprocess にフォールバックしない**。
