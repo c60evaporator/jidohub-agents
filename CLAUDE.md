@@ -87,14 +87,24 @@ src/
   （`sensing_to_planning` の時系列モデルも同じ機構を使う）
 - **継承順序は `class XAgent(StreamingMixin, BaseAgent)` で固定。**
   逆順だと Mixin の `predict` が `BaseAgent` の abstract を上書きできない
-- **`StreamingMixin` はタスク別抽象クラス（`Detection3DAgent` / `E2EAgent` 等）と併用しない。**
-  タスク別抽象クラスの `predict(input: Sample)`（単発）と Mixin の `predict(inputs: list)`（系列）は
-  シグネチャが非互換であり、合成すると型検査が正しく矛盾を報告する。必ず `BaseAgent` とだけ合成する
-- **`StreamingMixin` を継承したら `predict` は系列を取る。** ストリーミングが必要なタスク
-  （tracking / 時系列 E2E）用の**専用のタスク別抽象クラス**（系列出力型を `predict` で固定）は、
-  複合入力型・系列出力型を core に追加するのに合わせて**次段階**で定義する（4 章）
-- Agent 作者が実装するのは `reset()` と `step()` のみ。
-  **既定の `predict()` を override しないこと**
+- **`StreamingMixin` は単発のタスク別抽象クラス（`Detection3DAgent` / `E2EAgent` 等）と併用しない。**
+  単発クラスの `predict(input: Sample)` と Mixin の `predict(inputs: list)`（系列）はシグネチャが非互換で、
+  合成すると型検査が正しく矛盾を報告する。ストリーミングは**専用のタスク別抽象クラス**を使う
+- **ストリーミング用のタスク別抽象クラスは `base.py` 末尾に定義済み**
+  （`Tracking3DAgent` / `Tracking2DAgent` / `InstanceSegmentationTracking2DAgent` / `StreamingE2EAgent`）。
+  いずれも `class X(StreamingMixin, BaseAgent)` の組で、対応する系列出力型（`Detection3DSequence` 等）を
+  `predict` の戻り値として固定する。`predict` は override せず、戻り値型は `TYPE_CHECKING` ブロックの
+  シグネチャ宣言のみで型検査に伝える（既定実装をそのまま使う）
+- **`StreamingMixin` を継承したら `predict` は系列を取る。**
+- **`_aggregate` はストリーミング用のタスク別抽象クラスが実装する。**
+  系列出力型（薄いラッパ）への詰め替えを抽象クラスが引き受けるため、
+  **Agent 作者が実装するのは `reset()` と `step()` のみ**。**既定の `predict()` / `_aggregate()` を override しないこと**
+- **メタ情報は既定 `predict()` が入力から収集する。** `_collect_meta` が各入力の `.timestamp` を検証して
+  系列出力型の `timestamps` に引き写し（`None` や属性欠落は**ループ前に** `StreamingContractError`）、
+  `ego_to_global` を全入力が持つ場合のみ `(T,4,4)` にまとめる（2D 系列は `None`）。作者の負担にはしない
+- **複合入力型の `detections` 要否・座標系は `predict` の先頭で検証する。**
+  `config.requires` があるのに `detections` が `None`、または 3D の `detections` が `EGO` でない場合は
+  `UpstreamInputError`（`_check_requirements`）。`step` 直呼び（interfaces）でも同じ検証を呼べるよう protected で公開する
 - **不変条件**: `predict(inputs)` の結果は、`reset()` してから `step()` を
   手動ループした結果と一致する。共通テストで機械的に検証する
 - 未 `reset()` での `step()` は明示的にエラーにする
@@ -200,8 +210,9 @@ devkit 評価のラッパに留める。
 - **UniAD のネイティブ実装**。`remote_code` + docker で扱う
 - **`pack_into` / 共有メモリ転送**。実車・シミュレーション対応時
 - **閉ループ評価**
-- **複合入力型（`Tracking3DInput` 等）の core への定義**。
-  該当 Agent を実装するまで保留する
+- **ストリーミング Agent のネイティブ実装**（AB3DMOT / SimpleTrack 等の具体トラッカー）。
+  抽象クラス（`Tracking3DAgent` 等）と複合入力型・系列出力型は揃ったが、
+  具体実装は該当モデルの要求が来てから着手する
 
 ---
 

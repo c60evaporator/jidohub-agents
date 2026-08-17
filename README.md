@@ -52,6 +52,30 @@ agents は**クラス解決・重みロード・実行**を担う。
 画像を入力に取る 2D Agent のために、`import jidohub.agents` 時に既定の画像デコーダを登録する
 （既に登録済みなら上書きせず、nvJPEG が利用可能なら優先、なければ Pillow）。
 
+### ストリーミング Agent（tracking / 時系列 E2E）
+
+状態を持つ Agent はストリーミング用のタスク別抽象クラス（`Tracking3DAgent` 等）を継承し、
+**`reset()` と `step()` だけを実装する**。系列出力型への集約（`_aggregate`）とメタ情報
+（`timestamps` / `ego_to_global`）の収集は抽象クラスと基底が引き受ける。
+
+```python
+from jidohub.agents import Tracking3DAgent
+from jidohub.core.schemas import Detection3DOutput, Tracking3DInput
+
+class MyTracker(Tracking3DAgent):          # StreamingMixin + BaseAgent
+    def reset(self) -> None:
+        super().reset()
+        self._tracks = {}                  # セッション内の状態を初期化
+
+    def step(self, input: Tracking3DInput) -> Detection3DOutput:
+        self._check_initialized()
+        ...                                # 現フレームを処理し track_id を採番
+
+# オンライン（interfaces）: reset() してから step() を 1 フレームずつ
+# オフライン評価: predict(inputs) が系列をまとめて Detection3DSequence を返す
+seq = agent.predict(inputs)               # frames + timestamps + ego_to_global
+```
+
 ## 現段階の制限
 
 本リポジトリは立ち上げ段階であり、**ネイティブ実装 + inprocess 実行のみ**に対応する。
@@ -59,11 +83,9 @@ agents は**クラス解決・重みロード・実行**を担う。
 
 - `implementation.type == "remote_code"` の動的ロード（docker runner を要する）
 - `runner="docker"` / `transport="shm"`
-- ネイティブ実装（CenterPoint 等。`NATIVE_AGENTS` は現状空）
+- ネイティブ実装（CenterPoint / 具体トラッカー等。`NATIVE_AGENTS` は現状空。
+  ストリーミング用の**抽象クラス**（`Tracking3DAgent` 等）は提供済み）
 - 評価 / ベンチマークハーネス（`[benchmark]` extra は宣言のみ）
-- ストリーミング用のタスク別抽象クラス（`Tracking3DAgent` 等）。現状は `StreamingMixin` +
-  `BaseAgent` の組で扱い、系列出力型を `predict` で固定する専用クラスと、その複合入力型 /
-  系列出力型（core 側）は次段階で追加する
 
 未審査コード（`remote_code`）を inprocess で実行することはセキュリティ境界の違反であり、
 **黙って inprocess にフォールバックしない**。

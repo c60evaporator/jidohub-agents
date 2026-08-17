@@ -14,7 +14,15 @@ from typing import Any, Callable
 
 import numpy as np
 import pytest
-from jidohub.core.schemas import SCHEMA_VERSION, Image, ImageSample, LidarSweep, Sample
+from jidohub.core.schemas import (
+    SCHEMA_VERSION,
+    Image,
+    ImageSample,
+    LidarSweep,
+    Sample,
+    Tracking2DInput,
+    Tracking3DInput,
+)
 
 
 def _base_config(**overrides: Any) -> dict:
@@ -80,3 +88,22 @@ def sensor_sample() -> Sample:
 def image_sample() -> ImageSample:
     """200x100 の画素を持つ ImageSample。"""
     return ImageSample(image=Image(pixels=np.zeros((100, 200, 3), dtype=np.uint8)))
+
+
+@pytest.fixture
+def tracking3d_inputs() -> list[Tracking3DInput]:
+    """timestamps 0/1/2、ego=単位行列の ``Tracking3DInput`` 系列（``detections`` なし）。"""
+    return [Tracking3DInput(sample=Sample(timestamp=t, ego_to_global=np.eye(4))) for t in (0, 1, 2)]
+
+
+@pytest.fixture
+def tracking2d_inputs() -> list[Tracking2DInput]:
+    """timestamps 付き ``Tracking2DInput`` 系列。2D なので ego pose を持たない。"""
+    return [
+        Tracking2DInput(
+            image_sample=ImageSample(
+                image=Image(pixels=np.zeros((10, 10, 3), dtype=np.uint8)), timestamp=t
+            )
+        )
+        for t in (10, 20)
+    ]

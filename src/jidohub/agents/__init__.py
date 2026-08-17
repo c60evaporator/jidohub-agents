@@ -16,8 +16,12 @@ from jidohub.agents.base import (
     Detection3DAgent,
     E2EAgent,
     InstanceSegmentation2DAgent,
+    InstanceSegmentationTracking2DAgent,
     MapConstructionAgent,
+    StreamingE2EAgent,
     StreamingMixin,
+    Tracking2DAgent,
+    Tracking3DAgent,
 )
 from jidohub.agents.decoders import register_default_decoder
 from jidohub.agents.exceptions import (
@@ -25,6 +29,8 @@ from jidohub.agents.exceptions import (
     AgentResolutionError,
     IsolationViolationError,
     StateNotInitializedError,
+    StreamingContractError,
+    UpstreamInputError,
 )
 from jidohub.agents.processing import PreprocessResult
 from jidohub.agents.registry import NATIVE_AGENTS
@@ -43,6 +49,10 @@ __all__ = [
     "Detection2DAgent",
     "InstanceSegmentation2DAgent",
     "Classification2DAgent",
+    "Tracking3DAgent",
+    "Tracking2DAgent",
+    "InstanceSegmentationTracking2DAgent",
+    "StreamingE2EAgent",
     "PreprocessResult",
     "NATIVE_AGENTS",
     "register_default_decoder",
@@ -50,4 +60,6 @@ __all__ = [
     "AgentResolutionError",
     "IsolationViolationError",
     "StateNotInitializedError",
+    "StreamingContractError",
+    "UpstreamInputError",
 ]

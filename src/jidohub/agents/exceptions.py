@@ -11,6 +11,8 @@ __all__ = [
     "AgentResolutionError",
     "IsolationViolationError",
     "StateNotInitializedError",
+    "StreamingContractError",
+    "UpstreamInputError",
 ]
 
 
@@ -40,4 +42,24 @@ class StateNotInitializedError(AgentError):
 
     前シーンの内部状態が漏れると track_id が引き継がれ、評価結果を静かに
     汚染するため、明示的なエラーにする（CLAUDE.md 2.3）。
+    """
+
+
+class StreamingContractError(AgentError):
+    """ストリーミング入力のメタ契約に違反した場合。
+
+    ``StreamingMixin.predict`` の系列入力は ``.timestamp`` を公開することを契約とする
+    （streaming_agents.md 3.2）。属性を持たない入力型が渡された、または ``timestamp`` が
+    ``None`` の入力が混ざった場合に送出する。**系列全体をループする前に**送出し、
+    100 フレーム推論した後に集約で落ちるのを防ぐ。
+    """
+
+
+class UpstreamInputError(AgentError):
+    """複合入力型の上流出力（``detections``）が要件を満たさない場合。
+
+    ``config.requires`` が上流タスクを宣言しているのに ``detections`` が ``None``、
+    または ``detections`` の座標系が想定（3D 追跡では ``EGO``）と異なる場合に送出する。
+    **実行時検証は agents の責務**であり、core は config と型を持つだけ
+    （streaming_agents.md 5.1 / 5.2）。
     """

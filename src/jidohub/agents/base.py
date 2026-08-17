@@ -16,14 +16,20 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 from jidohub.core.config import AgentConfig
 from jidohub.core.schemas import (
     Classification2DOutput,
+    CoordinateFrame,
     Detection2DOutput,
+    Detection2DSequence,
     Detection3DOutput,
+    Detection3DSequence,
     E2EOutput,
+    E2ESequence,
     ImageSample,
     InstanceSegmentation2DOutput,
+    InstanceSegmentation2DSequence,
     MapOutput,
     Sample,
 )
@@ -33,10 +39,13 @@ from jidohub.agents.exceptions import (
     AgentResolutionError,
     IsolationViolationError,
     StateNotInitializedError,
+    StreamingContractError,
+    UpstreamInputError,
 )
 
 if TYPE_CHECKING:
     from jidohub.core.hub import AgentReference
+    from jidohub.core.schemas import Tracking2DInput, Tracking3DInput
 
 __all__ = [
     "BaseAgent",
@@ -47,6 +56,10 @@ __all__ = [
     "Detection2DAgent",
     "InstanceSegmentation2DAgent",
     "Classification2DAgent",
+    "Tracking3DAgent",
+    "Tracking2DAgent",
+    "InstanceSegmentationTracking2DAgent",
+    "StreamingE2EAgent",
 ]
 
 
@@ -211,14 +224,21 @@ class StreamingMixin:
     **tracking 専用ではない。** ``sensing_to_planning`` の時系列モデル（UniAD 等）も
     同じ機構を使うため、タスク横断の能力として定義する（CLAUDE.md 2.3）。
 
-    タスク別抽象クラスとは併用しない
-        ``Detection3DAgent`` 等のタスク別抽象クラスは ``predict(input: Sample)``（単発）を
+    単発のタスク別抽象クラスとは併用しない
+        ``Detection3DAgent`` 等の**単発**タスク別抽象クラスは ``predict(input: Sample)`` を
         宣言するが、本 Mixin の ``predict`` は **系列（``list``）** を取る。両者は
         シグネチャが非互換であり、合成すると型検査が正しく矛盾を報告する。
-        したがって **``class X(StreamingMixin, BaseAgent)``**（タスク別抽象クラスを
-        継承しない）とすること。ストリーミングが必要なタスク（tracking や時系列 E2E）用の
-        **専用のタスク別抽象クラス**（系列出力型を ``predict`` で固定するもの）は、
-        複合入力型・系列出力型を core に追加するのに合わせて次段階で定義する（CLAUDE.md 4 章）。
+        したがって単発クラスを継承せず **``class X(StreamingMixin, BaseAgent)``** とする。
+        ストリーミングが必要なタスク（tracking や時系列 E2E）は、系列出力型を固定する
+        **専用のタスク別抽象クラス**（:class:`Tracking3DAgent` / :class:`Tracking2DAgent` /
+        :class:`InstanceSegmentationTracking2DAgent` / :class:`StreamingE2EAgent`。本ファイル末尾）
+        を継承する。これらは ``StreamingMixin`` + ``BaseAgent`` の組であり、``_aggregate`` を
+        実装済みなので、**Agent 作者は :meth:`reset` と :meth:`step` だけを書けばよい**。
+
+    メタ情報の収集
+        既定 :meth:`predict` は :meth:`_collect_meta` で各入力から ``.timestamp`` と
+        ``ego_to_global`` を集め、系列出力型へ引き写す。**系列入力型は ``.timestamp`` を
+        公開する**ことを契約とする（streaming_agents.md 3.2）。
 
     継承順序
         ``class XAgent(StreamingMixin, BaseAgent)`` の順で継承すること。
@@ -261,24 +281,122 @@ class StreamingMixin:
     def predict(self, inputs: list) -> Any:
         """系列全体をまとめて処理する（**基底の既定実装。override しないこと**）。
 
-        :meth:`reset` してから :meth:`step` をループし、各フレームの出力を集約する。
+        入力からメタ情報（``timestamps`` / ``ego_to_global``）を集め、:meth:`reset` して
+        から :meth:`step` をループし、各フレームの出力を系列出力型へ集約する。
+        検証（メタ情報・上流入力）は**ループの前**に済ませる。100 フレーム推論した後で
+        落ちるのを避けるためである（streaming_agents.md 3.2）。
 
         **不変条件**: 本メソッドの結果は、``reset()`` してから ``step()`` を手動で
         ループした結果と**一致しなければならない**。一致しない場合、既定実装を
         上書きしているか、``step()`` が入力以外の状態に依存している。
         共通テストで機械的に検証する（CLAUDE.md 3.1）。
         """
+        timestamps, ego_poses = self._collect_meta(inputs)
+        self._check_requirements(inputs)
         self.reset()
         frames = [self.step(item) for item in inputs]
-        return self._aggregate(frames)
+        return self._aggregate(frames, timestamps, ego_poses)
+
+    def _collect_meta(self, inputs: list) -> tuple[np.ndarray, np.ndarray | None]:
+        """入力の系列からメタ情報（``timestamps`` / ``ego_to_global``）を収集する。
+
+        **系列入力型が ``.timestamp`` を公開する**ことを契約とする（streaming_agents.md 3.2）。
+        入力型ごとに分岐しないよう ``getattr`` で一様に収集する。``Sample`` は
+        ``ego_to_global`` を属性で、``Tracking3DInput`` はプロパティで公開し、
+        ``ImageSample`` / ``Tracking2DInput`` は**持たない**（2D 系列に ego pose を載せない）。
+
+        Returns:
+            ``timestamps`` は ``(T,)`` の ``int64`` 配列。``ego_to_global`` は
+            **全入力が公開する場合のみ** ``(T, 4, 4)`` 配列、そうでなければ ``None``。
+            空の系列は正常とし、空の ``timestamps`` と ``None`` を返す。
+
+        Raises:
+            StreamingContractError: ``.timestamp`` を持たない入力、または
+                ``timestamp`` が ``None`` の入力が混ざっている場合。**ループの前に**送出する。
+        """
+        if not inputs:
+            return np.empty((0,), dtype=np.int64), None
+
+        timestamps: list[int] = []
+        for i, item in enumerate(inputs):
+            if not hasattr(item, "timestamp"):
+                raise StreamingContractError(
+                    f"{type(self).__name__}: input at index {i} of type "
+                    f"{type(item).__name__} does not expose '.timestamp'; streaming input "
+                    "types must expose it (streaming_agents.md 3.2)."
+                )
+            ts = item.timestamp
+            if ts is None:
+                raise StreamingContractError(
+                    f"{type(self).__name__}: input at index {i} has timestamp=None; every "
+                    "frame in a streaming sequence needs a timestamp (evaluation uses it for "
+                    "non-uniform frame intervals). Set it upstream before predict()."
+                )
+            timestamps.append(ts)
+
+        egos = [getattr(item, "ego_to_global", None) for item in inputs]
+        if all(e is not None for e in egos):
+            ego_poses: np.ndarray | None = np.stack([np.asarray(e, dtype=np.float64) for e in egos])
+        else:
+            ego_poses = None
+        return np.asarray(timestamps, dtype=np.int64), ego_poses
+
+    def _check_requirements(self, inputs: list) -> None:
+        """複合入力型の上流出力（``detections``）が要件を満たすか検証する（タスク4）。
+
+        ``config.requires`` に上流タスクが宣言されているのに ``detections`` が ``None`` なら
+        エラーにする。**実行時検証は agents の責務**であり、core は config と型を持つだけ
+        （streaming_agents.md 5.2）。座標系も併せて検証する（3D の ``detections`` は ``EGO`` 前提。5.1）。
+
+        ``predict`` の先頭で呼ぶことで、オフライン評価・server 一括の経路（既定 ``predict`` が
+        制御する）では作者の規律に依存せず必ず走る。``step`` を直接呼ぶ経路（interfaces）でも
+        守るために protected として公開しており、その経路の実装時に同じ検証を呼べる。
+
+        Raises:
+            UpstreamInputError: ``requires`` があるのに ``detections`` が ``None``、または
+                ``detections`` の座標系が ``EGO`` でない場合。
+        """
+        config = getattr(self, "config", None)
+        requires = getattr(config, "requires", None) or []
+        if not requires:
+            return
+        for i, item in enumerate(inputs):
+            if not hasattr(item, "detections"):
+                # E2E / seg-tracking の入力型は上流の枠を持たない。
+                continue
+            detections = item.detections
+            if detections is None:
+                raise UpstreamInputError(
+                    f"{type(self).__name__}: config.requires={list(requires)} but input at "
+                    f"index {i} has detections=None; supply the upstream output (e.g. from a "
+                    "detector run) before predict()."
+                )
+            frame = getattr(detections, "frame", None)
+            if frame is not None and frame != CoordinateFrame.EGO:
+                raise UpstreamInputError(
+                    f"{type(self).__name__}: detections at index {i} are in frame "
+                    f"{frame.value!r}, but EGO is required. Have the caller align them to EGO, "
+                    "or call detections.to_global(sample.ego_to_global) inside the agent "
+                    "(streaming_agents.md 5.1)."
+                )
 
     @abstractmethod
-    def _aggregate(self, frames: list) -> Any:
-        """:meth:`step` の出力列を系列の出力型にまとめる（**Agent 作者が実装**）。
+    def _aggregate(
+        self, frames: list, timestamps: np.ndarray, ego_to_global: np.ndarray | None
+    ) -> Any:
+        """:meth:`step` の出力列を系列の出力型にまとめる。
+
+        **Agent 作者は実装しない。** ストリーミング用のタスク別抽象クラス
+        （:class:`Tracking3DAgent` 等）が実装し、系列出力型へ詰め替える
+        （streaming_agents.md 3.3）。
 
         系列の出力型は、単体タスクの出力型を時刻順に保持する薄いラッパとする
         （中間出力を単体タスクの出力型で表す既存方針と同じ）。これにより
         1 フレーム取り出せば既存の可視化コードがそのまま使える。
+
+        ``timestamps`` は既定 :meth:`predict` が入力から引き写すため、**Agent 作者の
+        負担にはならない**。``ego_to_global`` は 3D 系列でのみ意味を持ち、
+        **2D 系列では ``None`` で渡る**（2D の ``_aggregate`` は無視する）。
         """
 
     def _check_initialized(self) -> None:
@@ -294,16 +412,15 @@ class StreamingMixin:
             )
 
 
-# --- タスク別の抽象クラス -----------------------------------------------------
+# --- 単発のタスク別抽象クラス -------------------------------------------------
 #
 # predict のシグネチャで**出力型を固定**する。TaskType と出力型の 1 対 1 対応を
 # 型の上で表現するのが目的であり、実装は持たない。これらはすべて**単発**
 # （predict(input: Sample)）であり、StreamingMixin とは併用しない。
 #
 # ストリーミングが必要なタスク（tracking や時系列 E2E）は、StreamingMixin と
-# BaseAgent の組（class X(StreamingMixin, BaseAgent)）で**専用のタスク別抽象クラス**を
-# 別に定義する。系列出力型・複合入力型（Tracking3DInput 等）を core へ追加するのに
-# 合わせて次段階で用意するため、ここではまだ置かない（CLAUDE.md 2.3 / 4 章）。
+# BaseAgent の組（class X(StreamingMixin, BaseAgent)）による**専用のタスク別抽象クラス**を
+# このファイル末尾に別途定義する（CLAUDE.md 2.3 / 4 章）。
 
 
 class Detection3DAgent(BaseAgent):
@@ -328,10 +445,10 @@ class E2EAgent(BaseAgent):
     """End-to-end 自動運転（``sensing_to_planning``）。**単発推論**の抽象クラス。
 
     時系列モデル（UniAD 等）は本クラスを**継承しない**。``predict`` が系列を取るため
-    シグネチャが非互換になるからである。``StreamingMixin`` と ``BaseAgent`` の組で
-    別クラス（``class UniADAgent(StreamingMixin, BaseAgent)``）として定義する。
-    系列出力型を ``predict`` で固定するストリーミング用のタスク別抽象クラスは
-    次段階で core に追加する（:class:`StreamingMixin` の docstring 参照）。
+    シグネチャが非互換になるからである。ステートフルな E2E は :class:`StreamingE2EAgent`
+    （本ファイル末尾。``StreamingMixin`` + ``BaseAgent``）を継承する。単発版と系列版は
+    同一タスク（``sensing_to_planning``）の単発／系列という関係で、評価指標も同じである
+    （streaming_agents.md 6.4）。
     """
 
     task = TaskType.SENSING_TO_PLANNING
@@ -382,3 +499,111 @@ class Classification2DAgent(BaseAgent):
 
     @abstractmethod
     def predict(self, input: ImageSample) -> Classification2DOutput: ...
+
+
+# --- ストリーミング用のタスク別抽象クラス -------------------------------------
+#
+# StreamingMixin + BaseAgent の組（単発クラスは継承しない）。系列出力型への詰め替え
+# （_aggregate）を**抽象クラスが実装**するため、Agent 作者は reset / step だけを書けばよい
+# （streaming_agents.md 3.3）。predict は StreamingMixin の既定実装をそのまま使い、
+# **override しない**。戻り値の具体型は TYPE_CHECKING ブロックのシグネチャ宣言のみで
+# mypy に伝える（実装は差し替えない）。
+
+
+class Tracking3DAgent(StreamingMixin, BaseAgent):
+    """3D 物体追跡（``object_tracking_3d``）。
+
+    ``step`` は現フレームの ``Tracking3DInput``（``sample`` + 任意の上流 ``detections``）を
+    取り、``Detection3DOutput``（``track_id`` 付き）を返す。既定 ``predict`` が系列を
+    ``Detection3DSequence`` にまとめ、``timestamps`` / ``ego_to_global`` を入力から引き写す。
+    """
+
+    task = TaskType.OBJECT_TRACKING_3D
+
+    if TYPE_CHECKING:
+        # 実装は StreamingMixin.predict（override しない）。ここは戻り値型の宣言だけ。
+        def predict(self, inputs: list[Tracking3DInput]) -> Detection3DSequence: ...
+
+    def _aggregate(
+        self, frames: list, timestamps: np.ndarray, ego_to_global: np.ndarray | None
+    ) -> Detection3DSequence:
+        return Detection3DSequence(
+            frames=frames, timestamps=timestamps, ego_to_global=ego_to_global
+        )
+
+    @abstractmethod
+    def step(self, input: Tracking3DInput) -> Detection3DOutput: ...
+
+
+class Tracking2DAgent(StreamingMixin, BaseAgent):
+    """2D 物体追跡（``object_tracking_2d``）。
+
+    ``step`` は ``Tracking2DInput``（``image_sample`` + 任意の上流 ``detections``）を取り、
+    ``Detection2DOutput`` を返す。2D 系列は ego pose を持たないため、``_aggregate`` は
+    ``ego_to_global``（``None`` で渡る）を**無視する**。
+    """
+
+    task = TaskType.OBJECT_TRACKING_2D
+
+    if TYPE_CHECKING:
+
+        def predict(self, inputs: list[Tracking2DInput]) -> Detection2DSequence: ...
+
+    def _aggregate(
+        self, frames: list, timestamps: np.ndarray, ego_to_global: np.ndarray | None
+    ) -> Detection2DSequence:
+        # ego_to_global は 2D 系列では意味を持たないため無視する。
+        return Detection2DSequence(frames=frames, timestamps=timestamps)
+
+    @abstractmethod
+    def step(self, input: Tracking2DInput) -> Detection2DOutput: ...
+
+
+class InstanceSegmentationTracking2DAgent(StreamingMixin, BaseAgent):
+    """インスタンスセグメンテーション追跡（``instance_segmentation_tracking_2d``）。
+
+    入力は複合入力型を作らず ``ImageSample`` を直接取る。SAM2 系は上流検出を取らず、
+    プロンプトは ``ImageSample.prompt`` で受けるためである（streaming_agents.md 5.3）。
+    2D 系列のため ``_aggregate`` は ``ego_to_global``（``None`` で渡る）を**無視する**。
+    """
+
+    task = TaskType.INSTANCE_SEGMENTATION_TRACKING_2D
+
+    if TYPE_CHECKING:
+
+        def predict(self, inputs: list[ImageSample]) -> InstanceSegmentation2DSequence: ...
+
+    def _aggregate(
+        self, frames: list, timestamps: np.ndarray, ego_to_global: np.ndarray | None
+    ) -> InstanceSegmentation2DSequence:
+        # ego_to_global は 2D 系列では意味を持たないため無視する。
+        return InstanceSegmentation2DSequence(frames=frames, timestamps=timestamps)
+
+    @abstractmethod
+    def step(self, input: ImageSample) -> InstanceSegmentation2DOutput: ...
+
+
+class StreamingE2EAgent(StreamingMixin, BaseAgent):
+    """ステートフルな End-to-end 自動運転（``sensing_to_planning`` の系列版）。
+
+    UniAD / SparseDrive 等の時系列モデル。単発版 :class:`E2EAgent` を**継承しない**
+    （``predict`` のシグネチャが単発と非互換なため。streaming_agents.md 4 章）。
+    単発版と系列版は同一タスクの単発／系列という関係で、評価指標も同じである（6.4）。
+
+    ``step`` は現フレームの ``Sample`` を取り ``E2EOutput`` を返す。既定 ``predict`` が
+    系列を ``E2ESequence`` にまとめ、``timestamps`` / ``ego_to_global`` を引き写す。
+    """
+
+    task = TaskType.SENSING_TO_PLANNING
+
+    if TYPE_CHECKING:
+
+        def predict(self, inputs: list[Sample]) -> E2ESequence: ...
+
+    def _aggregate(
+        self, frames: list, timestamps: np.ndarray, ego_to_global: np.ndarray | None
+    ) -> E2ESequence:
+        return E2ESequence(frames=frames, timestamps=timestamps, ego_to_global=ego_to_global)
+
+    @abstractmethod
+    def step(self, input: Sample) -> E2EOutput: ...
